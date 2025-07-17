@@ -1,149 +1,105 @@
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#include <Wire.h>
+#include <WiFi.h>  // Load Wi-Fi library
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
+// Replace with your network credentials
+const char* ssid = "OPPO A74 5G";
+const char* password = "12345678";
 
-#define JOY_X 34
-#define JOY_Y 35
+// Set web server port number to 80
+WiFiServer server(80);
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// Store the HTTP request
+String header;
 
-#define GRID_SIZE 4
-#define MAX_LENGTH 64
+// Assign output variable to GPIO pin
+const int output26 = 2;
 
-int snakeX[MAX_LENGTH];
-int snakeY[MAX_LENGTH];
-int length = 3;
-
-int foodX = 40;
-int foodY = 20;
-
-int dirX = 1;  // direction (1,0)=right
-int dirY = 0;
-
-unsigned long lastMove = 0;
-int speed = 150;  // ms per move
+// Track current and previous time for timeout handling
+unsigned long currentTime = millis();
+unsigned long previousTime = 0;
+const long timeoutTime = 2000;  // 2 seconds
 
 void setup() {
   Serial.begin(115200);
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  display.clearDisplay();
-  
-  for (int i = 0; i < length; i++) {
-    snakeX[i] = 20 - i * GRID_SIZE;
-    snakeY[i] = 20;
+
+  // Set GPIO as output
+  pinMode(output26, OUTPUT);
+  digitalWrite(output26, LOW);  // Start with the output off
+
+  // Connect to Wi-Fi
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  randomSeed(analogRead(0));
-  spawnFood();
+  // Connection successful
+  Serial.println("");
+  Serial.println("WiFi connected.");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  server.begin();  // Start the server
 }
 
 void loop() {
-  handleInput();
+  WiFiClient client = server.available();  // Listen for incoming clients
 
-  if (millis() - lastMove > speed) {
-    moveSnake();
-    lastMove = millis();
-  }
+  if (client) {
+    Serial.println("New Client.");
+    String currentLine = "";
+    currentTime = millis();
+    previousTime = currentTime;
 
-  drawGame();
-}
+    while (client.connected() && currentTime - previousTime <= timeoutTime) {
+      currentTime = millis();
 
-void handleInput() {
-  int xVal = analogRead(JOY_X);
-  int yVal = analogRead(JOY_Y);
+      if (client.available()) {
+        char c = client.read();
+        Serial.write(c);
+        header += c;
 
-  if (xVal < 1000 && dirX == 0) {
-    dirX = -1;
-    dirY = 0;
-  } else if (xVal > 3000 && dirX == 0) {
-    dirX = 1;
-    dirY = 0;
-  } else if (yVal < 1000 && dirY == 0) {
-    dirX = 0;
-    dirY = -1;
-  } else if (yVal > 3000 && dirY == 0) {
-    dirX = 0;
-    dirY = 1;
-  }
-}
+        if (c == '\n') {
+          // End of HTTP request
+          if (currentLine.length() == 0) {
+            // Send HTTP response
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println();
 
-void moveSnake() {
-  int newX = snakeX[0] + dirX * GRID_SIZE;
-  int newY = snakeY[0] + dirY * GRID_SIZE;
+            // HTML content
+            client.println("<!DOCTYPE html><html>");
+            client.println("<head><title>ESP32 Bulb Control</title></head>");
+            client.println("<body><h1>ESP32 Web Server</h1>");
+            client.println("<p><a href=\"/on\"><button>Turn ON</button></a></p>");
+            client.println("<p><a href=\"/off\"><button>Turn OFF</button></a></p>");
+            client.println("</body></html>");
 
-  // Check collision with self or wall
-  if (newX < 0 || newX >= SCREEN_WIDTH || newY < 0 || newY >= SCREEN_HEIGHT || collidesWithBody(newX, newY)) {
-    gameOver();
-    return;
-  }
+            // Control GPIO based on request
+            if (header.indexOf("GET /on") >= 0) {
+              Serial.println("GPIO 2 ON");
+              digitalWrite(output26, HIGH);
+            } else if (header.indexOf("GET /off") >= 0) {
+              Serial.println("GPIO 2 OFF");
+              digitalWrite(output26, LOW);
+            }
 
-  // Move tail
-  for (int i = length - 1; i > 0; i--) {
-    snakeX[i] = snakeX[i - 1];
-    snakeY[i] = snakeY[i - 1];
-  }
-  snakeX[0] = newX;
-  snakeY[0] = newY;
-
-  // Check for food
-  if (newX == foodX && newY == foodY) {
-    if (length < MAX_LENGTH) {
-      length++;
+            // Break the while loop
+            break;
+          } else {
+            currentLine = "";
+          }
+        } else if (c != '\r') {
+          currentLine += c;
+        }
+      }
     }
-    spawnFood();
+
+    // Clear the header and close connection
+    header = "";
+    client.stop();
+    Serial.println("Client disconnected.");
+    Serial.println("");
   }
 }
-
-void drawGame() {
-  display.clearDisplay();
-
-  // Draw food
-  display.fillRect(foodX, foodY, GRID_SIZE, GRID_SIZE, WHITE);
-
-  // Draw snake
-  for (int i = 0; i < length; i++) {
-    display.fillRect(snakeX[i], snakeY[i], GRID_SIZE, GRID_SIZE, WHITE);
-  }
-
-  display.display();
-}
-
-void spawnFood() {
-  bool valid = false;
-  while (!valid) {
-    foodX = (random(0, SCREEN_WIDTH / GRID_SIZE)) * GRID_SIZE;
-    foodY = (random(0, SCREEN_HEIGHT / GRID_SIZE)) * GRID_SIZE;
-    valid = !collidesWithBody(foodX, foodY);
-  }
-}
-
-bool collidesWithBody(int x, int y) {
-  for (int i = 0; i < length; i++) {
-    if (snakeX[i] == x && snakeY[i] == y) return true;
-  }
-  return false;
-}
-
-void gameOver() {
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(WHITE);
-  display.setCursor(20, 20);
-  display.println("Game Over");
-  display.display();
-  delay(3000);
-  
-  length = 3;
-  for (int i = 0; i < length; i++) {
-    snakeX[i] = 20 - i * GRID_SIZE;
-    snakeY[i] = 20;
-  }
-  dirX = 1;
-  dirY = 0;
-  spawnFood();
-}
-
